@@ -392,5 +392,6 @@ callback patterns that Spook extends.
 ## License
 
 Based on Ghost_ESP (MIT). SDIO transport, 802.15.4 module, PMKID
-capture, portal system, and P4 host driver are original work. They
-are licensed under the BSD 3-Clause License. See LICENSE.
+capture, portal system, and P4 host driver are original work by
+John Stockdale and Off by One, Inc. They are licensed here under
+the BSD 3-Clause License. See LICENSE. Enjoy responsibly!
