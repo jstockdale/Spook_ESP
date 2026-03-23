@@ -1,5 +1,7 @@
 # Spook ESP — Tri-Band Security Radio Toolkit for the T-Display-P4
 
+![Spook ESP Banner](images/spook_esp.png)
+
 **Built on [Ghost_ESP](https://github.com/Spooks4576/Ghost_ESP) by [Spooks4576](https://github.com/Spooks4576)**
 **Developed by [jstockdale](https://github.com/jstockdale) / [Off by One](https://offx1.com)**
 
