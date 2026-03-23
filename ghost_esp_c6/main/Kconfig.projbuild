@@ -1,0 +1,87 @@
+menu "Spook ESP Configuration"
+
+    config GHOST_SDIO_ENABLED
+        bool "Enable SDIO slave transport to P4"
+        default y
+        help
+            Enable SDIO slave interface for communication with the ESP32-P4 host.
+
+    config GHOST_UART_FALLBACK
+        bool "Enable UART fallback console"
+        default y
+        help
+            Enable UART0 as a fallback command interface for standalone debugging.
+
+    menu "SD Card Configuration"
+        config GHOST_SD_ENABLED
+            bool "Enable SD card support"
+            default n
+
+        config GHOST_SD_SPI_CS_PIN
+            int "SD Card SPI CS pin"
+            default 4
+            depends on GHOST_SD_ENABLED
+
+        config GHOST_SD_SPI_CLK_PIN
+            int "SD Card SPI CLK pin"
+            default 18
+            depends on GHOST_SD_ENABLED
+
+        config GHOST_SD_SPI_MISO_PIN
+            int "SD Card SPI MISO pin"
+            default 19
+            depends on GHOST_SD_ENABLED
+
+        config GHOST_SD_SPI_MOSI_PIN
+            int "SD Card SPI MOSI pin"
+            default 23
+            depends on GHOST_SD_ENABLED
+    endmenu
+
+    menu "GPS Configuration"
+        config GHOST_GPS_ENABLED
+            bool "Enable GPS module"
+            default n
+
+        config GHOST_GPS_UART_NUM
+            int "GPS UART number"
+            default 1
+            depends on GHOST_GPS_ENABLED
+
+        config GHOST_GPS_TX_PIN
+            int "GPS TX pin (ESP RX)"
+            default 5
+            depends on GHOST_GPS_ENABLED
+
+        config GHOST_GPS_RX_PIN
+            int "GPS RX pin (ESP TX)"
+            default 4
+            depends on GHOST_GPS_ENABLED
+    endmenu
+
+    menu "Network Pipe Configuration"
+        config GHOST_NET_PIPE_ENABLED
+            bool "Enable network pipe for P4 internet access"
+            default y
+            help
+                Allow P4 to send/receive TCP/UDP traffic through the C6's WiFi connection.
+
+        config GHOST_NET_PIPE_PORT
+            int "Network pipe control port (internal)"
+            default 7777
+            depends on GHOST_NET_PIPE_ENABLED
+    endmenu
+
+    config GHOST_MAX_SCAN_RESULTS
+        int "Maximum WiFi scan results to store"
+        default 64
+
+    config GHOST_MAX_BLE_DEVICES
+        int "Maximum BLE devices to track"
+        default 64
+
+    config GHOST_PCAP_BUFFER_SIZE
+        int "PCAP write buffer size (bytes)"
+        default 4096
+
+endmenu
