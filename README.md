@@ -1,4 +1,5 @@
-# Spook ESP — Tri-Band Security Radio Toolkit for the T-Display-P4
+# Spook ESP
+## A Tri-Band Security Radio Toolkit for the T-Display-P4
 
 ![Spook ESP Banner](images/spook_esp.png)
 
