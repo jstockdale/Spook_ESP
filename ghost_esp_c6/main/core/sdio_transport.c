@@ -19,8 +19,11 @@
 #include "driver/sdio_slave.h"
 #include "driver/uart.h"
 #include "driver/usb_serial_jtag.h"
+#include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_sleep.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -127,10 +130,18 @@ static void IRAM_ATTR sdio_event_cb(uint8_t pos)
             esp_restart();
             break;
         case GHOST_CTRL_STOP_ALL:
-            /* Will be handled in task context via cmd queue */
+        case GHOST_CTRL_SLEEP_LIGHT:
+        case GHOST_CTRL_SLEEP_DEEP:
+            /* Handle in task context via cmd queue */
             {
                 cmd_item_t item;
-                strncpy(item.cmd, "stop", CMD_MAX_LEN);
+                if (ctrl == GHOST_CTRL_STOP_ALL) {
+                    strncpy(item.cmd, "stop", CMD_MAX_LEN);
+                } else if (ctrl == GHOST_CTRL_SLEEP_LIGHT) {
+                    strncpy(item.cmd, "sleep light", CMD_MAX_LEN);
+                } else {
+                    strncpy(item.cmd, "sleep deep", CMD_MAX_LEN);
+                }
                 BaseType_t woken = pdFALSE;
                 xQueueSendFromISR(g_cmd_queue, &item, &woken);
                 if (woken) portYIELD_FROM_ISR();
@@ -517,6 +528,137 @@ void sdio_transport_deinit(void)
     }
 
     ESP_LOGI(TAG, "SDIO slave transport deinitialized");
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ *  Sleep Management
+ *
+ *  Light sleep: CPU stops, RAM preserved, peripherals powered down.
+ *  SDIO slave state is maintained by hardware — when the host sends
+ *  any SDIO transaction, CLK toggles wake the C6 automatically.
+ *  The GPIO wake pin (C6_WAKEUP from P4's GPIO expander) also works.
+ *  After wake, execution resumes right after esp_light_sleep_start().
+ *
+ *  Deep sleep: Everything off. On wake, the chip reboots from scratch.
+ *  The P4 must detect this (heartbeat stops) and re-init the SDIO link.
+ *  Only GPIO and timer can wake from deep sleep — SDIO cannot.
+ * ══════════════════════════════════════════════════════════════════════ */
+
+static void configure_wake_sources(bool is_deep, uint32_t timeout_sec)
+{
+    /* GPIO wake pin */
+#if defined(CONFIG_GHOST_WAKE_GPIO) && CONFIG_GHOST_WAKE_GPIO >= 0
+    int wake_pin = CONFIG_GHOST_WAKE_GPIO;
+
+    if (is_deep) {
+        /* Deep sleep uses esp_deep_sleep_enable_gpio_wakeup */
+        esp_deep_sleep_enable_gpio_wakeup(BIT(wake_pin), ESP_GPIO_WAKEUP_GPIO_HIGH);
+        ESP_LOGI(TAG, "Deep sleep wake: GPIO%d (high)", wake_pin);
+    } else {
+        /* Light sleep uses gpio_wakeup_enable */
+        gpio_set_direction(wake_pin, GPIO_MODE_INPUT);
+        gpio_wakeup_enable(wake_pin, GPIO_INTR_HIGH_LEVEL);
+        esp_sleep_enable_gpio_wakeup();
+        ESP_LOGI(TAG, "Light sleep wake: GPIO%d (high)", wake_pin);
+    }
+#endif
+
+    /* Timer wake */
+    if (timeout_sec > 0) {
+        esp_sleep_enable_timer_wakeup((uint64_t)timeout_sec * 1000000ULL);
+        ESP_LOGI(TAG, "Sleep timer: %lu seconds", (unsigned long)timeout_sec);
+    }
+}
+
+static ghost_status_t s_pre_sleep_status = GHOST_STATUS_READY;
+
+void sdio_transport_enter_light_sleep(uint32_t timeout_sec)
+{
+    ESP_LOGI(TAG, "Entering light sleep (timeout=%lus)...", (unsigned long)timeout_sec);
+
+    /* Save current status for restore on wake */
+    s_pre_sleep_status = (ghost_status_t)sdio_slave_read_reg(GHOST_REG_STATUS);
+
+    /* Stop all radio operations cleanly */
+    command_execute("stop");
+
+    /* Update status register so P4 knows we're going down */
+    sdio_transport_set_status(GHOST_STATUS_SLEEPING);
+
+    /* Flush pending SDIO sends */
+    vTaskDelay(pdMS_TO_TICKS(CONFIG_GHOST_SLEEP_FLUSH_TIMEOUT_MS));
+    while (1) {
+        void *arg;
+        if (sdio_slave_send_get_finished(&arg, 0) != ESP_OK) break;
+    }
+
+    /* Suspend non-essential tasks */
+    if (s_heartbeat_task_handle) vTaskSuspend(s_heartbeat_task_handle);
+
+    /* Configure wake sources */
+    configure_wake_sources(false, timeout_sec);
+
+    /* WiFi/BLE need to be fully stopped for light sleep */
+    esp_wifi_stop();
+
+    ESP_LOGI(TAG, "Sleeping now...");
+
+    /* ── LIGHT SLEEP ── CPU halts here, resumes below on wake ── */
+    esp_err_t ret = esp_light_sleep_start();
+
+    /* ── WOKE UP ── */
+    esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+    const char *cause_str = "unknown";
+    switch (cause) {
+        case ESP_SLEEP_WAKEUP_TIMER: cause_str = "timer"; break;
+        case ESP_SLEEP_WAKEUP_GPIO:  cause_str = "GPIO";  break;
+        default: cause_str = "other"; break;
+    }
+
+    ESP_LOGI(TAG, "Woke from light sleep (cause: %s, ret: %s)",
+             cause_str, esp_err_to_name(ret));
+
+    /* Restart WiFi */
+    esp_wifi_start();
+
+    /* Resume heartbeat */
+    if (s_heartbeat_task_handle) vTaskResume(s_heartbeat_task_handle);
+
+    /* Restore status */
+    sdio_transport_set_status(s_pre_sleep_status);
+
+    ESP_LOGI(TAG, "Resumed — status: 0x%02x", s_pre_sleep_status);
+}
+
+void sdio_transport_enter_deep_sleep(uint32_t timeout_sec)
+{
+    ESP_LOGW(TAG, "Entering DEEP sleep (timeout=%lus). C6 will reboot on wake.",
+             (unsigned long)timeout_sec);
+
+    /* Stop all operations */
+    command_execute("stop");
+
+    /* Update status so P4 can read it before we go down.
+     * After deep sleep, this register is lost — the P4 will
+     * detect the C6 is down via heartbeat timeout. */
+    sdio_transport_set_status(GHOST_STATUS_DEEP_SLEEP);
+
+    /* Flush everything */
+    vTaskDelay(pdMS_TO_TICKS(CONFIG_GHOST_SLEEP_FLUSH_TIMEOUT_MS));
+
+    /* Close PCAP files, SD card, etc. */
+    command_execute("capture -stop");
+
+    /* Configure wake sources (GPIO + timer only, no SDIO) */
+    configure_wake_sources(true, timeout_sec);
+
+    ESP_LOGW(TAG, "Deep sleeping now — goodbye");
+
+    /* ── DEEP SLEEP ── Never returns. Reboots on wake. ── */
+    esp_deep_sleep_start();
+
+    /* Should never reach here */
+    esp_restart();
 }
 
 /* ══════════════════════════════════════════════════════════════════════

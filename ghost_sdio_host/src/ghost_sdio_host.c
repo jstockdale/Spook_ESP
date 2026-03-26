@@ -69,6 +69,8 @@ const char *ghost_status_to_str(ghost_status_t status)
     case GHOST_STATUS_ATTACKING: return "ATTACKING";
     case GHOST_STATUS_CONNECTED: return "CONNECTED";
     case GHOST_STATUS_PORTAL:    return "PORTAL";
+    case GHOST_STATUS_SLEEPING:  return "SLEEPING";
+    case GHOST_STATUS_DEEP_SLEEP:return "DEEP_SLEEP";
     case GHOST_STATUS_ERROR:     return "ERROR";
     default:                     return "UNKNOWN";
     }
@@ -529,6 +531,42 @@ void ghost_sdio_host_deinit(void)
 bool ghost_sdio_host_is_ready(void)
 {
     return s_initialized && s_c6_ready;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ *  Sleep / Power Management
+ * ══════════════════════════════════════════════════════════════════════ */
+
+esp_err_t ghost_sdio_host_sleep_light(void)
+{
+    return ghost_sdio_host_send_control(GHOST_CTRL_SLEEP_LIGHT);
+}
+
+esp_err_t ghost_sdio_host_sleep_deep(void)
+{
+    return ghost_sdio_host_send_control(GHOST_CTRL_SLEEP_DEEP);
+}
+
+esp_err_t ghost_sdio_host_sleep_light_timed(uint32_t timeout_sec)
+{
+    /* Timed sleep uses the command interface since the control
+     * register is a single byte (no room for a timeout value) */
+    char cmd[32];
+    snprintf(cmd, sizeof(cmd), "sleep light %lu", (unsigned long)timeout_sec);
+    return ghost_sdio_host_send_cmd(cmd);
+}
+
+esp_err_t ghost_sdio_host_sleep_deep_timed(uint32_t timeout_sec)
+{
+    char cmd[32];
+    snprintf(cmd, sizeof(cmd), "sleep deep %lu", (unsigned long)timeout_sec);
+    return ghost_sdio_host_send_cmd(cmd);
+}
+
+bool ghost_sdio_host_is_sleeping(void)
+{
+    ghost_status_t st = ghost_sdio_host_get_status();
+    return (st == GHOST_STATUS_SLEEPING || st == GHOST_STATUS_DEEP_SLEEP);
 }
 
 /* ══════════════════════════════════════════════════════════════════════

@@ -12,6 +12,24 @@ menu "Spook ESP Configuration"
         help
             Enable UART0 as a fallback command interface for standalone debugging.
 
+    menu "Sleep / Power Configuration"
+        config GHOST_WAKE_GPIO
+            int "GPIO pin for external wake (C6_WAKEUP from P4)"
+            default 2
+            help
+                GPIO connected to the C6_WAKEUP signal from the P4's GPIO expander.
+                On T-Display-P4: module pin 5 = C6 GPIO2.
+                Used as wake source for both light sleep and deep sleep.
+                Set to -1 to disable GPIO wake (timer-only wake).
+
+        config GHOST_SLEEP_FLUSH_TIMEOUT_MS
+            int "Timeout (ms) to flush pending data before sleep"
+            default 500
+            help
+                How long to wait for pending SDIO sends and PCAP writes
+                to complete before entering sleep.
+    endmenu
+
     menu "SD Card Configuration"
         config GHOST_SD_ENABLED
             bool "Enable SD card support"

@@ -743,6 +743,52 @@ static void cmd_time(int argc, char **argv) {
 }
 
 /* ── System ── */
+static void cmd_sleep(int argc, char **argv) {
+    if (argc < 2) {
+        OUT("Usage: sleep light [timeout_sec]  — light sleep (fast wake, RAM kept)\n");
+        OUT("       sleep deep [timeout_sec]   — deep sleep (full off, reboots on wake)\n");
+        OUT("       sleep status               — show sleep capabilities\n");
+        return;
+    }
+
+    if (strcmp(argv[1], "status") == 0) {
+        OUT("Sleep capabilities:\n");
+        OUT("  Light sleep: CPU halts, RAM preserved, wakes on SDIO/GPIO/timer\n");
+        OUT("  Deep sleep:  Full power off, reboots on wake (GPIO/timer only)\n");
+#if defined(CONFIG_GHOST_WAKE_GPIO) && CONFIG_GHOST_WAKE_GPIO >= 0
+        OUT("  Wake GPIO:   %d\n", CONFIG_GHOST_WAKE_GPIO);
+#else
+        OUT("  Wake GPIO:   disabled\n");
+#endif
+        OUT("  WiFi:        %s\n", wifi_manager_is_connected() ? "connected (will disconnect)" : "idle");
+        return;
+    }
+
+    uint32_t timeout = 0;
+    if (argc >= 3) {
+        timeout = (uint32_t)atoi(argv[2]);
+    }
+
+    if (strcmp(argv[1], "light") == 0) {
+        OUT("Entering light sleep");
+        if (timeout > 0) OUT(" (wake in %lus)", (unsigned long)timeout);
+        OUT("...\n");
+        /* Small delay so the response text gets sent before sleep */
+        vTaskDelay(pdMS_TO_TICKS(100));
+        sdio_transport_enter_light_sleep(timeout);
+        OUT("Woke from light sleep.\n");
+    } else if (strcmp(argv[1], "deep") == 0) {
+        OUT("Entering deep sleep");
+        if (timeout > 0) OUT(" (wake in %lus)", (unsigned long)timeout);
+        OUT(". C6 will reboot on wake.\n");
+        vTaskDelay(pdMS_TO_TICKS(100));
+        sdio_transport_enter_deep_sleep(timeout);
+        /* never reaches here */
+    } else {
+        OUT("Unknown: sleep %s\n", argv[1]);
+    }
+}
+
 static void cmd_reboot(int argc, char **argv) {
     OUT("Rebooting...\n");
     vTaskDelay(pdMS_TO_TICKS(100));
@@ -830,6 +876,7 @@ void command_register_all(void)
     command_register("time",       "Show/set time: time | time set Y M D H M S", cmd_time);
 
     /* System */
+    command_register("sleep",      "Sleep: light|deep [timeout_sec]|status", cmd_sleep);
     command_register("stop",       "Stop all operations",                cmd_stop);
     command_register("reboot",     "Reboot device",                      cmd_reboot);
 

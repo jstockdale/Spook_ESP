@@ -72,6 +72,8 @@ typedef enum {
     GHOST_STATUS_ATTACKING = 0x04,
     GHOST_STATUS_CONNECTED = 0x05,
     GHOST_STATUS_PORTAL    = 0x06,
+    GHOST_STATUS_SLEEPING  = 0x10,
+    GHOST_STATUS_DEEP_SLEEP= 0x11,
     GHOST_STATUS_ERROR     = 0xFF,
 } ghost_status_t;
 
@@ -90,6 +92,9 @@ typedef enum {
     GHOST_CTRL_RESET         = 0x01,
     GHOST_CTRL_STOP_ALL      = 0x02,
     GHOST_CTRL_HEARTBEAT_REQ = 0x03,
+    GHOST_CTRL_SLEEP_LIGHT   = 0x10,
+    GHOST_CTRL_SLEEP_DEEP    = 0x11,
+    GHOST_CTRL_WAKE          = 0x12,
 } ghost_control_t;
 
 #define GHOST_REG_STATUS       0
@@ -175,6 +180,50 @@ uint16_t           ghost_sdio_host_get_error(void);
 void               ghost_sdio_host_get_fw_version(uint8_t *major, uint8_t *minor);
 uint8_t            ghost_sdio_host_get_heartbeat(void);
 esp_err_t          ghost_sdio_host_send_control(ghost_control_t ctrl);
+
+/* ── Sleep / Power Management ── */
+
+/**
+ * Put the C6 into light sleep.
+ * The C6 stops all radio operations, preserves RAM, and halts the CPU.
+ * Wakes automatically when the P4 sends ANY SDIO transaction (CLK toggles),
+ * or via the C6_WAKEUP GPIO pin, or after the optional timeout.
+ * After wake, the C6 resumes and status returns to READY.
+ *
+ * To wake explicitly: just call any ghost_sdio_host_send_*() function,
+ * or toggle C6_WAKEUP high via the GPIO expander.
+ */
+esp_err_t ghost_sdio_host_sleep_light(void);
+
+/**
+ * Put the C6 into deep sleep.
+ * The C6 powers off completely and REBOOTS on wake (all state lost).
+ * SDIO bus activity does NOT wake from deep sleep — only GPIO or timer.
+ *
+ * After wake:
+ *   1. Toggle C6_WAKEUP or wait for timer to expire
+ *   2. Wait ~1 second for C6 to reboot
+ *   3. Call ghost_sdio_host_deinit() then ghost_sdio_host_init()
+ *   4. Wait for ghost_sdio_host_is_ready()
+ */
+esp_err_t ghost_sdio_host_sleep_deep(void);
+
+/**
+ * Put the C6 into light sleep with a wake timer.
+ * @param timeout_sec  Seconds until auto-wake (0 = manual wake only)
+ */
+esp_err_t ghost_sdio_host_sleep_light_timed(uint32_t timeout_sec);
+
+/**
+ * Put the C6 into deep sleep with a wake timer.
+ * @param timeout_sec  Seconds until auto-wake (0 = GPIO wake only)
+ */
+esp_err_t ghost_sdio_host_sleep_deep_timed(uint32_t timeout_sec);
+
+/**
+ * Check if the C6 is sleeping (light or deep).
+ */
+bool ghost_sdio_host_is_sleeping(void);
 
 /* ── Utility ── */
 const char *ghost_status_to_str(ghost_status_t status);

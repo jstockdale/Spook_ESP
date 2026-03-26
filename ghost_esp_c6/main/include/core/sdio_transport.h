@@ -117,6 +117,8 @@ typedef enum {
     GHOST_STATUS_ATTACKING = 0x04,
     GHOST_STATUS_CONNECTED = 0x05,
     GHOST_STATUS_PORTAL    = 0x06,
+    GHOST_STATUS_SLEEPING  = 0x10,  /* entering light sleep */
+    GHOST_STATUS_DEEP_SLEEP= 0x11,  /* entering deep sleep (will reboot on wake) */
     GHOST_STATUS_ERROR     = 0xFF,
 } ghost_status_t;
 
@@ -137,6 +139,9 @@ typedef enum {
     GHOST_CTRL_RESET         = 0x01,
     GHOST_CTRL_STOP_ALL      = 0x02,
     GHOST_CTRL_HEARTBEAT_REQ = 0x03,
+    GHOST_CTRL_SLEEP_LIGHT   = 0x10,  /* enter light sleep (fast wake, RAM preserved) */
+    GHOST_CTRL_SLEEP_DEEP    = 0x11,  /* enter deep sleep (full off, reboots on wake) */
+    GHOST_CTRL_WAKE          = 0x12,  /* wake from light sleep (also: any SDIO activity wakes) */
 } ghost_control_t;
 
 /* ── Host interrupt bit positions ── */
@@ -161,6 +166,32 @@ void sdio_transport_set_status(ghost_status_t status);
 void sdio_transport_set_radio_mode(ghost_radio_mode_t mode);
 void sdio_transport_set_error(uint16_t error_code);
 bool sdio_transport_is_active(void);
+
+/**
+ * Enter light sleep. Stops all radio operations first.
+ * C6 preserves RAM and SDIO state. Wakes on:
+ *   - SDIO bus activity (host sends any command/data)
+ *   - GPIO wake pin (C6_WAKEUP from P4 GPIO expander)
+ *   - Timer (if timeout_sec > 0)
+ * After wake, resumes from where it left off. Status goes
+ * SLEEPING → READY automatically.
+ *
+ * @param timeout_sec  Wake timer in seconds (0 = wake only on external trigger)
+ */
+void sdio_transport_enter_light_sleep(uint32_t timeout_sec);
+
+/**
+ * Enter deep sleep. Stops all operations, flushes state.
+ * C6 loses all RAM — reboots from scratch on wake.
+ * P4 must re-init the SDIO link after wake.
+ * Wakes on:
+ *   - GPIO wake pin
+ *   - Timer (if timeout_sec > 0)
+ * NOTE: SDIO bus activity does NOT wake from deep sleep.
+ *
+ * @param timeout_sec  Wake timer in seconds (0 = wake only on GPIO)
+ */
+void sdio_transport_enter_deep_sleep(uint32_t timeout_sec);
 
 extern QueueHandle_t g_cmd_queue;
 
