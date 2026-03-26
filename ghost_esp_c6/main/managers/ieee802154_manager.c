@@ -138,12 +138,16 @@ esp_err_t ieee802154_start_scan(void) {
     s_device_count = 0;
     s_current_channel = 11;
     xTaskCreate(scan_task, "802154_scan", 4096, NULL, 5, &s_scan_task);
+    sdio_transport_set_radio_mode(GHOST_RADIO_802154_SCAN);
+    sdio_transport_set_status(GHOST_STATUS_SCANNING);
     return ESP_OK;
 }
 
 esp_err_t ieee802154_stop_scan(void) {
     s_scanning = false;
     s_capturing = false;
+    sdio_transport_set_radio_mode(GHOST_RADIO_IDLE);
+    sdio_transport_set_status(GHOST_STATUS_READY);
     return ESP_OK;
 }
 
@@ -180,6 +184,38 @@ void ieee802154_print_scan_results(void) {
         ieee802154_device_t *d = &s_devices[i];
         OUT("0x%04x   0x%04x   %2d   %4d   %3d   %lu\n",
             d->pan_id, d->short_addr, d->channel, d->rssi, d->lqi, (unsigned long)d->frame_count);
+    }
+
+    /* Emit structured results over SDIO */
+    if (sdio_transport_is_active() && s_device_count > 0) {
+        int sent = 0;
+        while (sent < s_device_count) {
+            int batch = s_device_count - sent;
+            if (batch > 15) batch = 15; /* ~300 bytes per batch */
+
+            uint8_t buf[sizeof(ghost_scan_header_t) + 15 * sizeof(ghost_scan_802154_device_t)];
+            ghost_scan_header_t *hdr = (ghost_scan_header_t *)buf;
+            hdr->scan_type = GHOST_SCAN_802154_DEVICE;
+            hdr->count = batch;
+            hdr->flags = (sent + batch < s_device_count) ? GHOST_SCAN_FLAG_MORE : 0;
+
+            ghost_scan_802154_device_t *records = (ghost_scan_802154_device_t *)(buf + sizeof(ghost_scan_header_t));
+            for (int i = 0; i < batch; i++) {
+                ieee802154_device_t *d = &s_devices[sent + i];
+                records[i].pan_id = d->pan_id;
+                records[i].short_addr = d->short_addr;
+                memcpy(records[i].ext_addr, d->ext_addr, 8);
+                records[i].channel = d->channel;
+                records[i].rssi = d->rssi;
+                records[i].lqi = d->lqi;
+                records[i]._pad = 0;
+                records[i].frame_count = d->frame_count;
+            }
+
+            sdio_transport_send(GHOST_FRAME_SCAN_RESULT, buf,
+                sizeof(ghost_scan_header_t) + batch * sizeof(ghost_scan_802154_device_t));
+            sent += batch;
+        }
     }
 }
 

@@ -348,6 +348,26 @@ void wifi_pmkid_scan_callback(void *buf, wifi_promiscuous_pkt_type_t type) {
     OUT("  Station: %02x:%02x:%02x:%02x:%02x:%02x\n",
         station[0], station[1], station[2], station[3], station[4], station[5]);
     OUT("  Hashcat: %s*%s*%s*%s\n", pmkid_hex, bssid_hex, sta_hex, ssid_hex);
+
+    /* Emit structured PMKID result */
+    if (sdio_transport_is_active()) {
+        uint8_t sbuf[sizeof(ghost_scan_header_t) + sizeof(ghost_scan_pmkid_t)];
+        ghost_scan_header_t *shdr = (ghost_scan_header_t *)sbuf;
+        shdr->scan_type = GHOST_SCAN_PMKID;
+        shdr->count = 1;
+        shdr->flags = 0;
+
+        ghost_scan_pmkid_t *rec = (ghost_scan_pmkid_t *)(sbuf + sizeof(ghost_scan_header_t));
+        memcpy(rec->pmkid, pmkid, 16);
+        memcpy(rec->bssid, bssid, 6);
+        memcpy(rec->station, station, 6);
+        size_t slen = strlen(ssid);
+        rec->ssid_len = slen > 13 ? 13 : slen;
+        memset(rec->ssid, 0, 13);
+        memcpy(rec->ssid, ssid, rec->ssid_len);
+
+        sdio_transport_send(GHOST_FRAME_SCAN_RESULT, sbuf, sizeof(sbuf));
+    }
 }
 
 /* ── Pwnagotchi callback ── */

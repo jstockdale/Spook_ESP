@@ -37,6 +37,15 @@ void ble_stop_skimmer_detection(void);
 esp_err_t ble_register_handler(ble_data_handler_t handler);
 esp_err_t ble_unregister_handler(ble_data_handler_t handler);
 
+/* ── GATT Client ── */
+void ble_gatt_connect(const uint8_t *addr, uint8_t addr_type);
+void ble_gatt_disconnect(uint16_t conn_handle);
+void ble_gatt_discover_services(uint16_t conn_handle);
+void ble_gatt_read(uint16_t conn_handle, uint16_t attr_handle);
+void ble_gatt_write(uint16_t conn_handle, uint16_t attr_handle,
+                     const uint8_t *data, size_t len);
+void ble_gatt_subscribe(uint16_t conn_handle, uint16_t attr_handle);
+
 #endif
 #ifdef __cplusplus
 }

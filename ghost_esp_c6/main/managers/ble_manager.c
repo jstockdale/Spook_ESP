@@ -109,6 +109,32 @@ static int ble_gap_event_handler(struct ble_gap_event *event, void *arg) {
             desc->addr.val[5], desc->addr.val[4], desc->addr.val[3],
             desc->addr.val[2], desc->addr.val[1], desc->addr.val[0],
             desc->rssi, name);
+
+        /* Emit structured result */
+        if (sdio_transport_is_active()) {
+            uint8_t buf[sizeof(ghost_scan_header_t) + sizeof(ghost_scan_ble_device_t)];
+            ghost_scan_header_t *hdr = (ghost_scan_header_t *)buf;
+            hdr->scan_type = GHOST_SCAN_BLE_DEVICE;
+            hdr->count = 1;
+            hdr->flags = 0;
+
+            ghost_scan_ble_device_t *rec = (ghost_scan_ble_device_t *)(buf + sizeof(ghost_scan_header_t));
+            /* Store address in display order (MSB first) */
+            for (int k = 0; k < 6; k++) rec->addr[k] = desc->addr.val[5-k];
+            rec->addr_type = desc->addr.type;
+            rec->rssi = desc->rssi;
+
+            uint16_t cid_val = 0xFFFF;
+            extract_company_id(desc->data, desc->length_data, &cid_val);
+            rec->company_id = cid_val;
+
+            size_t nlen = strlen(name);
+            rec->name_len = nlen > 21 ? 21 : nlen;
+            memset(rec->name, 0, 21);
+            memcpy(rec->name, name, rec->name_len);
+
+            sdio_transport_send(GHOST_FRAME_SCAN_RESULT, buf, sizeof(buf));
+        }
         break;
     }
 
@@ -240,6 +266,8 @@ static void start_scan_internal(void) {
 
     ble_gap_disc(BLE_OWN_ADDR_PUBLIC, BLE_HS_FOREVER, &params, ble_gap_event_handler, NULL);
     s_scanning = true;
+    sdio_transport_set_radio_mode(GHOST_RADIO_BLE_SCAN);
+    sdio_transport_set_status(GHOST_STATUS_SCANNING);
 }
 
 void ble_start_scanning(void)        { s_ble_mode = BLE_MODE_SCAN;         start_scan_internal(); }
@@ -263,6 +291,8 @@ void ble_stop(void) {
         s_scanning = false;
     }
     s_ble_mode = BLE_MODE_NONE;
+    sdio_transport_set_radio_mode(GHOST_RADIO_IDLE);
+    sdio_transport_set_status(GHOST_STATUS_READY);
 }
 
 void ble_deinit(void) {
@@ -335,6 +365,264 @@ void ble_skimmer_scan_callback(struct ble_gap_event *event, void *arg) {
             desc->addr.val[2], desc->addr.val[1], desc->addr.val[0],
             desc->rssi);
     }
+}
+
+
+
+/* ══════════════════════════════════════════════════════════════════════
+ *  BLE GATT Client — connect, discover, read, write, subscribe
+ *
+ *  Commands arrive as text via the command system:
+ *    bleconnect <mac>
+ *    bledisconnect <conn_handle>
+ *    blesvc <conn_handle>          (discover services)
+ *    bleread <conn_handle> <attr_handle>
+ *    blewrite <conn_handle> <attr_handle> <hex>
+ *    blesub <conn_handle> <attr_handle>
+ *
+ *  Results go back as GHOST_FRAME_SCAN_RESULT with GATT sub-types.
+ * ══════════════════════════════════════════════════════════════════════ */
+
+#define MAX_GATT_CONNECTIONS 3
+
+static struct {
+    uint16_t conn_handle;
+    uint8_t  peer_addr[6];
+    bool     connected;
+} s_gatt_conns[MAX_GATT_CONNECTIONS];
+
+static int gatt_find_free_slot(void) {
+    for (int i = 0; i < MAX_GATT_CONNECTIONS; i++) {
+        if (!s_gatt_conns[i].connected) return i;
+    }
+    return -1;
+}
+
+static int gatt_find_by_handle(uint16_t handle) {
+    for (int i = 0; i < MAX_GATT_CONNECTIONS; i++) {
+        if (s_gatt_conns[i].connected && s_gatt_conns[i].conn_handle == handle) return i;
+    }
+    return -1;
+}
+
+/* GATT event handler */
+static int ble_gatt_event_handler(struct ble_gap_event *event, void *arg) {
+    switch (event->type) {
+    case BLE_GAP_EVENT_CONNECT: {
+        if (event->connect.status == 0) {
+            uint16_t ch = event->connect.conn_handle;
+            int slot = gatt_find_free_slot();
+            if (slot >= 0) {
+                s_gatt_conns[slot].conn_handle = ch;
+                s_gatt_conns[slot].connected = true;
+                OUT("BLE GATT connected: handle=%d
+", ch);
+            }
+        } else {
+            OUT("BLE GATT connect failed: %d
+", event->connect.status);
+        }
+        break;
+    }
+
+    case BLE_GAP_EVENT_DISCONNECT: {
+        uint16_t ch = event->disconnect.conn.conn_handle;
+        int slot = gatt_find_by_handle(ch);
+        if (slot >= 0) s_gatt_conns[slot].connected = false;
+        OUT("BLE GATT disconnected: handle=%d reason=%d
+", ch, event->disconnect.reason);
+        break;
+    }
+
+    case BLE_GAP_EVENT_NOTIFY_RX: {
+        /* Notification/indication received */
+        uint16_t ch = event->notify_rx.conn_handle;
+        uint16_t ah = event->notify_rx.attr_handle;
+        uint16_t len = OS_MBUF_PKTLEN(event->notify_rx.om);
+
+        if (sdio_transport_is_active() && len <= 256) {
+            uint8_t buf[sizeof(ghost_scan_header_t) + sizeof(ghost_scan_gatt_value_t) + 256];
+            ghost_scan_header_t *hdr = (ghost_scan_header_t *)buf;
+            hdr->scan_type = GHOST_SCAN_BLE_GATT_CHR;
+            hdr->count = 1;
+            hdr->flags = 0;
+
+            ghost_scan_gatt_value_t *val = (ghost_scan_gatt_value_t *)(buf + sizeof(ghost_scan_header_t));
+            val->conn_handle = ch;
+            val->attr_handle = ah;
+            val->value_len = len;
+            val->status = 0;
+            val->_pad = 0;
+
+            uint8_t *data = (uint8_t *)(val + 1);
+            os_mbuf_copydata(event->notify_rx.om, 0, len, data);
+
+            sdio_transport_send(GHOST_FRAME_SCAN_RESULT, buf,
+                sizeof(ghost_scan_header_t) + sizeof(ghost_scan_gatt_value_t) + len);
+        }
+
+        OUT("BLE notify: handle=%d attr=0x%04x len=%d
+", ch, ah, len);
+        break;
+    }
+
+    default:
+        break;
+    }
+    return 0;
+}
+
+/* Service discovery callback */
+static int ble_gatt_disc_svc_cb(uint16_t conn_handle,
+                                 const struct ble_gatt_error *error,
+                                 const struct ble_gatt_svc *service,
+                                 void *arg) {
+    if (error->status == BLE_HS_EDONE) {
+        OUT("Service discovery complete.
+");
+        return 0;
+    }
+    if (error->status != 0) {
+        OUT("Service discovery error: %d
+", error->status);
+        return 0;
+    }
+
+    OUT("  Service: start=0x%04x end=0x%04x uuid=",
+        service->start_handle, service->end_handle);
+
+    char uuid_str[40];
+    ble_uuid_to_str(&service->uuid.u, uuid_str);
+    OUT("%s
+", uuid_str);
+
+    /* Emit structured result */
+    if (sdio_transport_is_active()) {
+        uint8_t buf[sizeof(ghost_scan_header_t) + sizeof(ghost_scan_gatt_svc_t)];
+        ghost_scan_header_t *hdr = (ghost_scan_header_t *)buf;
+        hdr->scan_type = GHOST_SCAN_BLE_GATT_SVC;
+        hdr->count = 1;
+        hdr->flags = 0;
+
+        ghost_scan_gatt_svc_t *rec = (ghost_scan_gatt_svc_t *)(buf + sizeof(ghost_scan_header_t));
+        rec->start_handle = service->start_handle;
+        rec->end_handle = service->end_handle;
+        if (service->uuid.u.type == BLE_UUID_TYPE_16) {
+            rec->uuid_len = 2;
+            memset(rec->uuid, 0, 16);
+            uint16_t u16 = BLE_UUID16(&service->uuid.u)->value;
+            memcpy(rec->uuid, &u16, 2);
+        } else {
+            rec->uuid_len = 16;
+            memcpy(rec->uuid, BLE_UUID128(&service->uuid.u)->value, 16);
+        }
+        sdio_transport_send(GHOST_FRAME_SCAN_RESULT, buf, sizeof(buf));
+    }
+    return 0;
+}
+
+/* Read callback */
+static int ble_gatt_read_cb(uint16_t conn_handle,
+                              const struct ble_gatt_error *error,
+                              struct ble_gatt_attr *attr,
+                              void *arg) {
+    if (error->status != 0) {
+        OUT("BLE read error: %d
+", error->status);
+        return 0;
+    }
+
+    uint16_t len = OS_MBUF_PKTLEN(attr->om);
+    uint8_t data[256];
+    if (len > sizeof(data)) len = sizeof(data);
+    os_mbuf_copydata(attr->om, 0, len, data);
+
+    OUT("BLE read: attr=0x%04x len=%d
+  ", attr->handle, len);
+    for (int i = 0; i < len && i < 32; i++) OUT("%02x ", data[i]);
+    OUT("
+");
+
+    /* Emit structured result */
+    if (sdio_transport_is_active()) {
+        uint8_t buf[sizeof(ghost_scan_header_t) + sizeof(ghost_scan_gatt_value_t) + 256];
+        ghost_scan_header_t *hdr = (ghost_scan_header_t *)buf;
+        hdr->scan_type = GHOST_SCAN_BLE_GATT_CHR;
+        hdr->count = 1;
+        hdr->flags = 0;
+
+        ghost_scan_gatt_value_t *val = (ghost_scan_gatt_value_t *)(buf + sizeof(ghost_scan_header_t));
+        val->conn_handle = conn_handle;
+        val->attr_handle = attr->handle;
+        val->value_len = len;
+        val->status = 0;
+        val->_pad = 0;
+        memcpy(val + 1, data, len);
+
+        sdio_transport_send(GHOST_FRAME_SCAN_RESULT, buf,
+            sizeof(ghost_scan_header_t) + sizeof(ghost_scan_gatt_value_t) + len);
+    }
+    return 0;
+}
+
+/* Public GATT API called from command handlers */
+void ble_gatt_connect(const uint8_t *addr, uint8_t addr_type) {
+    if (!s_ble_initialized) ble_init();
+    /* Stop scanning if active */
+    if (s_scanning) ble_stop();
+
+    ble_addr_t peer = { .type = addr_type };
+    memcpy(peer.val, addr, 6);
+
+    int rc = ble_gap_connect(BLE_OWN_ADDR_PUBLIC, &peer, 10000,
+                              NULL, ble_gatt_event_handler, NULL);
+    if (rc != 0) {
+        OUT("BLE connect failed to start: %d
+", rc);
+    } else {
+        OUT("BLE connecting...
+");
+    }
+}
+
+void ble_gatt_disconnect(uint16_t conn_handle) {
+    ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+}
+
+void ble_gatt_discover_services(uint16_t conn_handle) {
+    int rc = ble_gattc_disc_all_svcs(conn_handle, ble_gatt_disc_svc_cb, NULL);
+    if (rc != 0) OUT("Service discovery start failed: %d
+", rc);
+    else OUT("Discovering services on handle %d...
+", conn_handle);
+}
+
+void ble_gatt_read(uint16_t conn_handle, uint16_t attr_handle) {
+    int rc = ble_gattc_read(conn_handle, attr_handle, ble_gatt_read_cb, NULL);
+    if (rc != 0) OUT("Read failed: %d
+", rc);
+}
+
+void ble_gatt_write(uint16_t conn_handle, uint16_t attr_handle,
+                     const uint8_t *data, size_t len) {
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(data, len);
+    if (!om) { OUT("Write: no mbuf
+"); return; }
+    int rc = ble_gattc_write_flat(conn_handle, attr_handle, data, len, NULL, NULL);
+    if (rc != 0) OUT("Write failed: %d
+", rc);
+    else OUT("Write OK: handle=%d attr=0x%04x len=%d
+", conn_handle, attr_handle, (int)len);
+}
+
+void ble_gatt_subscribe(uint16_t conn_handle, uint16_t attr_handle) {
+    /* Write 0x0001 to CCCD (attr_handle + 1) to enable notifications */
+    uint8_t val[2] = {0x01, 0x00};
+    int rc = ble_gattc_write_flat(conn_handle, attr_handle + 1, val, 2, NULL, NULL);
+    if (rc != 0) OUT("Subscribe failed: %d
+", rc);
+    else OUT("Subscribed to notifications on 0x%04x
+", attr_handle);
 }
 
 #endif /* !CONFIG_IDF_TARGET_ESP32S2 */

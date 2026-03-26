@@ -46,6 +46,84 @@ typedef struct __attribute__((packed)) {
 #define GHOST_FRAME_HEADER_SIZE  8
 #define GHOST_MAX_PAYLOAD        (4092 - GHOST_FRAME_HEADER_SIZE)
 
+/* ── Structured scan result types ── */
+typedef enum {
+    GHOST_SCAN_WIFI_AP       = 0x01,
+    GHOST_SCAN_WIFI_STA      = 0x02,
+    GHOST_SCAN_BLE_DEVICE    = 0x03,
+    GHOST_SCAN_802154_DEVICE = 0x04,
+    GHOST_SCAN_PMKID         = 0x05,
+    GHOST_SCAN_BLE_GATT_SVC  = 0x06,
+    GHOST_SCAN_BLE_GATT_CHR  = 0x07,
+} ghost_scan_type_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t  scan_type;
+    uint8_t  count;
+    uint16_t flags;
+} ghost_scan_header_t;
+
+#define GHOST_SCAN_FLAG_MORE  0x0001
+
+typedef struct __attribute__((packed)) {
+    uint8_t  bssid[6];
+    int8_t   rssi;
+    uint8_t  channel;
+    uint8_t  authmode;
+    uint8_t  ssid_len;
+    char     ssid[18];
+} ghost_scan_wifi_ap_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t  mac[6];
+    uint8_t  bssid[6];
+    int8_t   rssi;
+    uint8_t  _pad;
+} ghost_scan_wifi_sta_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t  addr[6];
+    uint8_t  addr_type;
+    int8_t   rssi;
+    uint16_t company_id;
+    uint8_t  name_len;
+    char     name[21];
+} ghost_scan_ble_device_t;
+
+typedef struct __attribute__((packed)) {
+    uint16_t pan_id;
+    uint16_t short_addr;
+    uint8_t  ext_addr[8];
+    uint8_t  channel;
+    int8_t   rssi;
+    uint8_t  lqi;
+    uint8_t  _pad;
+    uint32_t frame_count;
+} ghost_scan_802154_device_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t  pmkid[16];
+    uint8_t  bssid[6];
+    uint8_t  station[6];
+    uint8_t  ssid_len;
+    char     ssid[13];
+} ghost_scan_pmkid_t;
+
+typedef struct __attribute__((packed)) {
+    uint16_t start_handle;
+    uint16_t end_handle;
+    uint8_t  uuid_len;
+    uint8_t  uuid[16];
+} ghost_scan_gatt_svc_t;
+
+typedef struct __attribute__((packed)) {
+    uint16_t conn_handle;
+    uint16_t attr_handle;
+    uint16_t value_len;
+    uint8_t  status;
+    uint8_t  _pad;
+} ghost_scan_gatt_value_t;
+
 /* ── GPS data payload (for GHOST_FRAME_GPS, P4→C6) ── */
 typedef struct __attribute__((packed)) {
     uint8_t  has_fix;       /* 0=no fix, 1=fix */
@@ -228,6 +306,83 @@ bool ghost_sdio_host_is_sleeping(void);
 /* ── Utility ── */
 const char *ghost_status_to_str(ghost_status_t status);
 const char *ghost_radio_mode_to_str(ghost_radio_mode_t mode);
+
+/* ══════════════════════════════════════════════════════════════════════
+ *  Structured Scan Result Parsing
+ *
+ *  When the C6 sends GHOST_FRAME_SCAN_RESULT, the payload starts with
+ *  a ghost_scan_header_t followed by `count` packed records whose type
+ *  depends on scan_type. These helpers extract them.
+ * ══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Parse a SCAN_RESULT frame. Returns the header and a pointer to records.
+ *
+ * Usage:
+ *   ghost_scan_header_t hdr;
+ *   const void *records;
+ *   ghost_scan_parse(payload, len, &hdr, &records);
+ *   if (hdr.scan_type == GHOST_SCAN_WIFI_AP) {
+ *       const ghost_scan_wifi_ap_t *aps = records;
+ *       for (int i = 0; i < hdr.count; i++) { ... aps[i].ssid ... }
+ *   }
+ */
+static inline esp_err_t ghost_scan_parse(const void *payload, size_t len,
+                                          ghost_scan_header_t *out_hdr,
+                                          const void **out_records)
+{
+    if (len < sizeof(ghost_scan_header_t)) return ESP_ERR_INVALID_SIZE;
+    const ghost_scan_header_t *hdr = (const ghost_scan_header_t *)payload;
+    if (out_hdr) *out_hdr = *hdr;
+    if (out_records) *out_records = (const uint8_t *)payload + sizeof(ghost_scan_header_t);
+    return ESP_OK;
+}
+
+/**
+ * Get the record size for a given scan type.
+ */
+static inline size_t ghost_scan_record_size(ghost_scan_type_t type)
+{
+    switch (type) {
+    case GHOST_SCAN_WIFI_AP:       return sizeof(ghost_scan_wifi_ap_t);
+    case GHOST_SCAN_WIFI_STA:      return sizeof(ghost_scan_wifi_sta_t);
+    case GHOST_SCAN_BLE_DEVICE:    return sizeof(ghost_scan_ble_device_t);
+    case GHOST_SCAN_802154_DEVICE: return sizeof(ghost_scan_802154_device_t);
+    case GHOST_SCAN_PMKID:         return sizeof(ghost_scan_pmkid_t);
+    case GHOST_SCAN_BLE_GATT_SVC:  return sizeof(ghost_scan_gatt_svc_t);
+    default: return 0;
+    }
+}
+
+/**
+ * Convenience: get scan type name for logging.
+ */
+static inline const char *ghost_scan_type_to_str(ghost_scan_type_t type)
+{
+    switch (type) {
+    case GHOST_SCAN_WIFI_AP:       return "WIFI_AP";
+    case GHOST_SCAN_WIFI_STA:      return "WIFI_STA";
+    case GHOST_SCAN_BLE_DEVICE:    return "BLE_DEVICE";
+    case GHOST_SCAN_802154_DEVICE: return "802154_DEVICE";
+    case GHOST_SCAN_PMKID:         return "PMKID";
+    case GHOST_SCAN_BLE_GATT_SVC:  return "GATT_SVC";
+    case GHOST_SCAN_BLE_GATT_CHR:  return "GATT_CHR";
+    default: return "UNKNOWN";
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ *  Hardware Pin Reference (T-Display-P4)
+ *
+ *  C6_ESP_EN: Controls the C6 chip enable. Directly connected to
+ *  the XCL9535 GPIO expander (U4) on the P4's I2C bus.
+ *  Pull low to hold C6 in reset; release (high) to let it boot.
+ *  Use for hard-reset recovery after deep sleep or a C6 crash.
+ *
+ *  C6_WAKEUP: Connected to C6 GPIO2 (module pin 5).
+ *  Also routed through the XCL9535 GPIO expander.
+ *  Toggle high to wake from deep sleep.
+ * ══════════════════════════════════════════════════════════════════════ */
 
 /* ══════════════════════════════════════════════════════════════════════
  *  Network Pipe — P4-side convenience API

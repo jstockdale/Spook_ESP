@@ -20,6 +20,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <dirent.h>
+#include "esp_sntp.h"
 
 static const char *TAG = "wifi_mgr";
 
@@ -49,6 +50,15 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
         s_connected = true;
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)data;
         OUT("Got IP: " IPSTR "\n", IP2STR(&event->ip_info.ip));
+        sdio_transport_set_status(GHOST_STATUS_CONNECTED);
+
+        /* Auto-sync time via NTP when we get internet access */
+        if (!spook_has_realtime()) {
+            esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+            esp_sntp_setservername(0, "pool.ntp.org");
+            esp_sntp_init();
+            ESP_LOGI(TAG, "NTP time sync started");
+        }
     }
 }
 
@@ -82,6 +92,8 @@ esp_err_t wifi_manager_init(void) {
 void wifi_manager_start_scan(void) {
     wifi_scan_config_t scan_cfg = { .show_hidden = true, .scan_type = WIFI_SCAN_TYPE_ACTIVE };
     esp_wifi_set_mode(WIFI_MODE_STA);
+    sdio_transport_set_radio_mode(GHOST_RADIO_WIFI_SCAN);
+    sdio_transport_set_status(GHOST_STATUS_SCANNING);
     esp_wifi_scan_start(&scan_cfg, true); /* blocking */
 
     uint16_t num = MAX_AP_RECORDS;
@@ -98,6 +110,41 @@ void wifi_manager_start_scan(void) {
         g_ap_list[i].selected = (i == s_selected_ap);
     }
     OUT("Found %d APs\n", g_ap_count);
+
+    sdio_transport_set_status(GHOST_STATUS_READY);
+    sdio_transport_set_radio_mode(GHOST_RADIO_IDLE);
+
+    /* Emit structured scan results over SDIO for P4 UI */
+    if (sdio_transport_is_active() && g_ap_count > 0) {
+        /* Send in batches of 20 (fits in one SDIO frame) */
+        int sent = 0;
+        while (sent < g_ap_count) {
+            int batch = g_ap_count - sent;
+            if (batch > 20) batch = 20;
+
+            uint8_t buf[sizeof(ghost_scan_header_t) + 20 * sizeof(ghost_scan_wifi_ap_t)];
+            ghost_scan_header_t *hdr = (ghost_scan_header_t *)buf;
+            hdr->scan_type = GHOST_SCAN_WIFI_AP;
+            hdr->count = batch;
+            hdr->flags = (sent + batch < g_ap_count) ? GHOST_SCAN_FLAG_MORE : 0;
+
+            ghost_scan_wifi_ap_t *records = (ghost_scan_wifi_ap_t *)(buf + sizeof(ghost_scan_header_t));
+            for (int i = 0; i < batch; i++) {
+                ghost_ap_record_t *ap = &g_ap_list[sent + i];
+                memcpy(records[i].bssid, ap->bssid, 6);
+                records[i].rssi = ap->rssi;
+                records[i].channel = ap->channel;
+                records[i].authmode = (uint8_t)ap->authmode;
+                size_t slen = strlen(ap->ssid);
+                records[i].ssid_len = slen > 18 ? 18 : slen;
+                memcpy(records[i].ssid, ap->ssid, records[i].ssid_len);
+            }
+
+            sdio_transport_send(GHOST_FRAME_SCAN_RESULT, buf,
+                sizeof(ghost_scan_header_t) + batch * sizeof(ghost_scan_wifi_ap_t));
+            sent += batch;
+        }
+    }
 }
 
 void wifi_manager_print_scan_results(void) {
@@ -148,12 +195,14 @@ void wifi_manager_start_monitor_mode(wifi_promiscuous_cb_t_t callback) {
     esp_wifi_set_promiscuous(false);
     esp_wifi_set_promiscuous_rx_cb(callback);
     esp_wifi_set_promiscuous(true);
+    sdio_transport_set_radio_mode(GHOST_RADIO_WIFI_MONITOR);
     ESP_LOGI(TAG, "Monitor mode started");
 }
 
 void wifi_manager_stop_monitor_mode(void) {
     esp_wifi_set_promiscuous(false);
     g_station_count = 0;
+    sdio_transport_set_radio_mode(GHOST_RADIO_IDLE);
     ESP_LOGI(TAG, "Monitor mode stopped");
 }
 
@@ -165,12 +214,15 @@ esp_err_t wifi_manager_connect(const char *ssid, const char *password) {
     if (password) strncpy((char *)cfg.sta.password, password, sizeof(cfg.sta.password) - 1);
 
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &cfg));
+    sdio_transport_set_radio_mode(GHOST_RADIO_WIFI_STA);
     return esp_wifi_connect();
 }
 
 void wifi_manager_disconnect(void) {
     esp_wifi_disconnect();
     s_connected = false;
+    sdio_transport_set_radio_mode(GHOST_RADIO_IDLE);
+    sdio_transport_set_status(GHOST_STATUS_READY);
 }
 
 bool wifi_manager_is_connected(void) { return s_connected; }
@@ -225,11 +277,13 @@ void wifi_manager_start_deauth(void) {
     if (!wifi_manager_get_selected_ap()) { OUT("No AP selected. Use scanap + select first.\n"); return; }
     s_deauth_running = true;
     s_deauth_packets_sent = 0;
+    sdio_transport_set_status(GHOST_STATUS_ATTACKING);
     xTaskCreate(deauth_task, "deauth", 4096, NULL, 5, &s_deauth_task);
 }
 
 void wifi_manager_stop_deauth(void) {
     s_deauth_running = false;
+    sdio_transport_set_status(GHOST_STATUS_READY);
     OUT("Deauth: %lu packets sent\n", (unsigned long)s_deauth_packets_sent);
 }
 
@@ -545,6 +599,8 @@ void wifi_manager_start_evil_portal(const char *url, const char *ssid,
     httpd_cfg.lru_purge_enable = true;
     httpd_cfg.stack_size = 8192;
 
+    sdio_transport_set_status(GHOST_STATUS_PORTAL);
+    sdio_transport_set_radio_mode(GHOST_RADIO_WIFI_AP);
     if (httpd_start(&s_portal_httpd, &httpd_cfg) == ESP_OK) {
         httpd_uri_t get_uri = { .uri = "/", .method = HTTP_GET, .handler = portal_get_handler };
         httpd_uri_t post_uri = { .uri = "/login", .method = HTTP_POST, .handler = portal_post_handler };
@@ -562,6 +618,8 @@ void wifi_manager_stop_evil_portal(void) {
     if (s_portal_dns) { stop_dns_server(s_portal_dns); s_portal_dns = NULL; }
     s_portal_dir[0] = '\0';
     esp_wifi_set_mode(WIFI_MODE_STA);
+    sdio_transport_set_status(GHOST_STATUS_READY);
+    sdio_transport_set_radio_mode(GHOST_RADIO_IDLE);
 }
 
 /* ── Network tools ── */

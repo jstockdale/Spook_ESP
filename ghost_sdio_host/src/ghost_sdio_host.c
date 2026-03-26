@@ -343,18 +343,52 @@ static void rx_task(void *arg)
             process_rx_frame(s_rx_buf, got_len);
         }
 
-        /* Heartbeat monitoring (every ~5 seconds) */
+        /* Heartbeat monitoring + error recovery (every ~5 seconds) */
         static int poll_count = 0;
         if (++poll_count >= 250) {  /* 250 * 20ms = 5s */
             poll_count = 0;
             uint8_t hb = ghost_sdio_host_get_heartbeat();
             if (hb == last_heartbeat) {
                 heartbeat_stale_count++;
-                if (heartbeat_stale_count >= 3) {
-                    ESP_LOGW(TAG, "C6 heartbeat stale (%d cycles)", heartbeat_stale_count);
+                if (heartbeat_stale_count >= 3 && s_c6_ready) {
+                    ESP_LOGW(TAG, "C6 heartbeat stale (%d cycles), attempting recovery",
+                             heartbeat_stale_count);
                     s_c6_ready = false;
                 }
+
+                /* After 6 stale cycles (30s), try ESSL re-handshake */
+                if (heartbeat_stale_count == 6) {
+                    ESP_LOGW(TAG, "C6 unresponsive for 30s, re-initializing ESSL");
+                    esp_err_t reinit = essl_init(s_essl, 2000 / portTICK_PERIOD_MS);
+                    if (reinit == ESP_OK) {
+                        ghost_status_t st = ghost_sdio_host_get_status();
+                        ESP_LOGI(TAG, "ESSL re-init OK, C6 status: %s",
+                                 ghost_status_to_str(st));
+                        if (st == GHOST_STATUS_READY || st == GHOST_STATUS_SCANNING ||
+                            st == GHOST_STATUS_CONNECTED) {
+                            s_c6_ready = true;
+                            heartbeat_stale_count = 0;
+                            last_heartbeat = ghost_sdio_host_get_heartbeat();
+                            ESP_LOGI(TAG, "C6 link recovered");
+                        }
+                    } else {
+                        ESP_LOGE(TAG, "ESSL re-init failed: %s — C6 may need hard reset",
+                                 esp_err_to_name(reinit));
+                    }
+                }
+
+                /* After 12 stale cycles (60s), give up — needs GPIO reset */
+                if (heartbeat_stale_count >= 12 && heartbeat_stale_count % 12 == 0) {
+                    ESP_LOGE(TAG, "C6 unresponsive for %ds. Hard reset required "
+                             "(toggle C6_ESP_EN via GPIO expander).",
+                             heartbeat_stale_count * 5);
+                }
             } else {
+                if (!s_c6_ready && heartbeat_stale_count > 0) {
+                    ESP_LOGI(TAG, "C6 heartbeat recovered (was stale for %d cycles)",
+                             heartbeat_stale_count);
+                    s_c6_ready = true;
+                }
                 heartbeat_stale_count = 0;
                 last_heartbeat = hb;
             }

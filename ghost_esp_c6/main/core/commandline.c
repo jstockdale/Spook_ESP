@@ -286,6 +286,67 @@ static void cmd_blewardriving(int argc, char **argv) {
         OUT("BLE wardriving started.\n");
     }
 }
+
+/* ── BLE GATT commands ── */
+static int parse_mac(const char *str, uint8_t *out) {
+    /* Parse "aa:bb:cc:dd:ee:ff" into 6-byte array (in BLE order: LSB first) */
+    unsigned int b[6];
+    if (sscanf(str, "%x:%x:%x:%x:%x:%x", &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) != 6)
+        return -1;
+    /* BLE addr is stored LSB first: val[0]=LSB, val[5]=MSB */
+    for (int i = 0; i < 6; i++) out[i] = (uint8_t)b[5-i];
+    return 0;
+}
+
+static void cmd_bleconnect(int argc, char **argv) {
+    if (argc < 2) { OUT("Usage: bleconnect <aa:bb:cc:dd:ee:ff> [addr_type=0]\n"); return; }
+    uint8_t addr[6];
+    if (parse_mac(argv[1], addr) != 0) { OUT("Invalid MAC\n"); return; }
+    uint8_t atype = (argc >= 3) ? (uint8_t)atoi(argv[2]) : 0;
+    ble_gatt_connect(addr, atype);
+}
+
+static void cmd_bledisconnect(int argc, char **argv) {
+    if (argc < 2) { OUT("Usage: bledisconnect <conn_handle>\n"); return; }
+    ble_gatt_disconnect((uint16_t)atoi(argv[1]));
+}
+
+static void cmd_blesvc(int argc, char **argv) {
+    if (argc < 2) { OUT("Usage: blesvc <conn_handle>\n"); return; }
+    ble_gatt_discover_services((uint16_t)atoi(argv[1]));
+}
+
+static void cmd_bleread(int argc, char **argv) {
+    if (argc < 3) { OUT("Usage: bleread <conn_handle> <attr_handle_hex>\n"); return; }
+    uint16_t ch = (uint16_t)atoi(argv[1]);
+    uint16_t ah = (uint16_t)strtol(argv[2], NULL, 16);
+    ble_gatt_read(ch, ah);
+}
+
+static void cmd_blewrite(int argc, char **argv) {
+    if (argc < 4) { OUT("Usage: blewrite <conn_handle> <attr_handle_hex> <hex_data>\n"); return; }
+    uint16_t ch = (uint16_t)atoi(argv[1]);
+    uint16_t ah = (uint16_t)strtol(argv[2], NULL, 16);
+
+    /* Parse hex data */
+    const char *hex = argv[3];
+    size_t hex_len = strlen(hex);
+    if (hex_len % 2 != 0 || hex_len > 512) { OUT("Invalid hex data\n"); return; }
+    uint8_t data[256];
+    size_t data_len = hex_len / 2;
+    for (size_t i = 0; i < data_len; i++) {
+        char h[3] = { hex[i*2], hex[i*2+1], 0 };
+        data[i] = (uint8_t)strtol(h, NULL, 16);
+    }
+    ble_gatt_write(ch, ah, data, data_len);
+}
+
+static void cmd_blesub(int argc, char **argv) {
+    if (argc < 3) { OUT("Usage: blesub <conn_handle> <attr_handle_hex>\n"); return; }
+    uint16_t ch = (uint16_t)atoi(argv[1]);
+    uint16_t ah = (uint16_t)strtol(argv[2], NULL, 16);
+    ble_gatt_subscribe(ch, ah);
+}
 #endif
 
 /* ── 802.15.4 / Zigbee ── */
@@ -843,6 +904,12 @@ void command_register_all(void)
 #ifndef CONFIG_IDF_TARGET_ESP32S2
     command_register("blescan",    "BLE scan (-f/-ds/-a/-r/-s)",         cmd_blescan);
     command_register("blewardriving","BLE wardriving [-s to stop]",      cmd_blewardriving);
+    command_register("bleconnect",  "BLE GATT connect <mac> [addr_type]",cmd_bleconnect);
+    command_register("bledisconnect","BLE disconnect <conn_handle>",     cmd_bledisconnect);
+    command_register("blesvc",      "BLE discover services <conn_handle>",cmd_blesvc);
+    command_register("bleread",     "BLE read <conn> <attr_hex>",        cmd_bleread);
+    command_register("blewrite",    "BLE write <conn> <attr_hex> <hex>", cmd_blewrite);
+    command_register("blesub",      "BLE subscribe <conn> <attr_hex>",   cmd_blesub);
 #endif
 
     /* 802.15.4 */

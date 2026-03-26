@@ -86,6 +86,114 @@ typedef struct __attribute__((packed)) {
     uint8_t  second;
 } ghost_gps_data_t;  /* 24 bytes */
 
+/* ══════════════════════════════════════════════════════════════════════
+ *  Structured scan result payloads (GHOST_FRAME_SCAN_RESULT)
+ *
+ *  Every SCAN_RESULT frame starts with a ghost_scan_header_t identifying
+ *  the result type and record count, followed by packed records.
+ *  This lets the P4 parse results programmatically without text scraping.
+ * ══════════════════════════════════════════════════════════════════════ */
+
+/* Scan result sub-types */
+typedef enum {
+    GHOST_SCAN_WIFI_AP      = 0x01,
+    GHOST_SCAN_WIFI_STA     = 0x02,
+    GHOST_SCAN_BLE_DEVICE   = 0x03,
+    GHOST_SCAN_802154_DEVICE= 0x04,
+    GHOST_SCAN_PMKID        = 0x05,
+    GHOST_SCAN_BLE_GATT_SVC = 0x06,  /* GATT service discovery result */
+    GHOST_SCAN_BLE_GATT_CHR = 0x07,  /* GATT characteristic read result */
+} ghost_scan_type_t;
+
+/* Common header for all scan result frames (4 bytes) */
+typedef struct __attribute__((packed)) {
+    uint8_t  scan_type;     /* ghost_scan_type_t */
+    uint8_t  count;         /* number of records following */
+    uint16_t flags;         /* bit 0: more results coming (pagination) */
+} ghost_scan_header_t;
+
+#define GHOST_SCAN_FLAG_MORE  0x0001  /* more results follow in next frame */
+
+/* ── WiFi AP record (28 bytes) ── */
+typedef struct __attribute__((packed)) {
+    uint8_t  bssid[6];
+    int8_t   rssi;
+    uint8_t  channel;
+    uint8_t  authmode;      /* wifi_auth_mode_t */
+    uint8_t  ssid_len;
+    char     ssid[18];      /* first 18 chars (truncated for fit) */
+} ghost_scan_wifi_ap_t;
+
+/* ── WiFi Station record (14 bytes) ── */
+typedef struct __attribute__((packed)) {
+    uint8_t  mac[6];
+    uint8_t  bssid[6];      /* associated AP */
+    int8_t   rssi;
+    uint8_t  _pad;
+} ghost_scan_wifi_sta_t;
+
+/* ── BLE Device record (32 bytes) ── */
+typedef struct __attribute__((packed)) {
+    uint8_t  addr[6];
+    uint8_t  addr_type;     /* 0=public, 1=random */
+    int8_t   rssi;
+    uint16_t company_id;    /* manufacturer ID, 0xFFFF if unknown */
+    uint8_t  name_len;
+    char     name[21];      /* truncated */
+} ghost_scan_ble_device_t;
+
+/* ── 802.15.4 Device record (20 bytes) ── */
+typedef struct __attribute__((packed)) {
+    uint16_t pan_id;
+    uint16_t short_addr;
+    uint8_t  ext_addr[8];
+    uint8_t  channel;
+    int8_t   rssi;
+    uint8_t  lqi;
+    uint8_t  _pad;
+    uint32_t frame_count;
+} ghost_scan_802154_device_t;
+
+/* ── PMKID record (42 bytes) ── */
+typedef struct __attribute__((packed)) {
+    uint8_t  pmkid[16];
+    uint8_t  bssid[6];
+    uint8_t  station[6];
+    uint8_t  ssid_len;
+    char     ssid[13];      /* truncated for fit; full in text output */
+} ghost_scan_pmkid_t;
+
+/* ── BLE GATT service record (20 bytes) ── */
+typedef struct __attribute__((packed)) {
+    uint16_t start_handle;
+    uint16_t end_handle;
+    uint8_t  uuid_len;      /* 2 (16-bit) or 16 (128-bit) */
+    uint8_t  uuid[16];      /* little-endian */
+} ghost_scan_gatt_svc_t;    /* 21 bytes */
+
+/* ── BLE GATT characteristic value (variable, header is 8 bytes) ── */
+typedef struct __attribute__((packed)) {
+    uint16_t conn_handle;
+    uint16_t attr_handle;
+    uint16_t value_len;
+    uint8_t  status;        /* 0=success, nonzero=error */
+    uint8_t  _pad;
+    /* followed by value_len bytes of data */
+} ghost_scan_gatt_value_t;
+
+/* ══════════════════════════════════════════════════════════════════════
+ *  BLE GATT frame types (for GHOST_FRAME_SCAN_RESULT with GATT sub-types)
+ *
+ *  The P4 sends BLE GATT commands as regular CMD frames:
+ *    "bleconnect aa:bb:cc:dd:ee:ff"
+ *    "bleread <conn_handle> <attr_handle>"
+ *    "blewrite <conn_handle> <attr_handle> <hex_data>"
+ *    "blesub <conn_handle> <attr_handle>"
+ *    "bledisconnect <conn_handle>"
+ *
+ *  Results come back as GHOST_FRAME_SCAN_RESULT with GATT sub-types.
+ * ══════════════════════════════════════════════════════════════════════ */
+
 #define GHOST_FRAME_MAGIC        0x47
 #define GHOST_FRAME_HEADER_SIZE  8
 #define GHOST_MAX_PAYLOAD        (4092 - GHOST_FRAME_HEADER_SIZE)
