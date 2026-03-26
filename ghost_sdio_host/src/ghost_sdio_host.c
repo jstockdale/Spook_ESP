@@ -530,3 +530,111 @@ bool ghost_sdio_host_is_ready(void)
 {
     return s_initialized && s_c6_ready;
 }
+
+/* ══════════════════════════════════════════════════════════════════════
+ *  Network Pipe — P4-side convenience functions
+ * ══════════════════════════════════════════════════════════════════════ */
+
+static esp_err_t send_netpipe_frame(uint8_t op, uint8_t conn_id,
+                                     const void *payload, size_t payload_len) {
+    uint8_t buf[4092];
+    if (sizeof(ghost_netpipe_header_t) + payload_len > sizeof(buf)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    ghost_netpipe_header_t *hdr = (ghost_netpipe_header_t *)buf;
+    hdr->op = op;
+    hdr->conn_id = conn_id;
+    hdr->flags = 0;
+
+    if (payload && payload_len > 0) {
+        memcpy(buf + sizeof(ghost_netpipe_header_t), payload, payload_len);
+    }
+
+    return ghost_sdio_host_send(GHOST_FRAME_NETPIPE, buf,
+                                 sizeof(ghost_netpipe_header_t) + payload_len);
+}
+
+esp_err_t ghost_netpipe_tcp_connect(const char *host, uint16_t port, bool use_tls)
+{
+    if (!host) return ESP_ERR_INVALID_ARG;
+    size_t host_len = strlen(host);
+    if (host_len == 0 || host_len > 127) return ESP_ERR_INVALID_SIZE;
+
+    /* Build connect payload: port(2) + use_tls(1) + host_len(1) + host */
+    uint8_t payload[4 + 128];
+    payload[0] = port & 0xFF;
+    payload[1] = (port >> 8) & 0xFF;
+    payload[2] = use_tls ? 1 : 0;
+    payload[3] = (uint8_t)host_len;
+    memcpy(&payload[4], host, host_len);
+
+    return send_netpipe_frame(NETPIPE_OP_TCP_CONNECT, 0xFF,
+                               payload, 4 + host_len);
+}
+
+esp_err_t ghost_netpipe_send(uint8_t conn_id, const void *data, size_t len)
+{
+    return send_netpipe_frame(NETPIPE_OP_DATA, conn_id, data, len);
+}
+
+esp_err_t ghost_netpipe_close(uint8_t conn_id)
+{
+    return send_netpipe_frame(NETPIPE_OP_CLOSE, conn_id, NULL, 0);
+}
+
+esp_err_t ghost_netpipe_udp_send(const char *host, uint16_t port,
+                                  const void *data, size_t len)
+{
+    if (!host) return ESP_ERR_INVALID_ARG;
+    size_t host_len = strlen(host);
+    if (host_len == 0 || host_len > 127) return ESP_ERR_INVALID_SIZE;
+
+    /* Build: port(2) + host_len(1) + pad(1) + host + data */
+    size_t frame_len = 4 + host_len + len;
+    uint8_t *payload = malloc(frame_len);
+    if (!payload) return ESP_ERR_NO_MEM;
+
+    payload[0] = port & 0xFF;
+    payload[1] = (port >> 8) & 0xFF;
+    payload[2] = (uint8_t)host_len;
+    payload[3] = 0;
+    memcpy(&payload[4], host, host_len);
+    if (data && len > 0) {
+        memcpy(&payload[4 + host_len], data, len);
+    }
+
+    esp_err_t ret = send_netpipe_frame(NETPIPE_OP_UDP_SEND, 0xFF,
+                                        payload, frame_len);
+    free(payload);
+    return ret;
+}
+
+esp_err_t ghost_netpipe_dns_resolve(const char *host)
+{
+    if (!host) return ESP_ERR_INVALID_ARG;
+    size_t host_len = strlen(host);
+    if (host_len == 0 || host_len > 127) return ESP_ERR_INVALID_SIZE;
+
+    uint8_t payload[4 + 128];
+    payload[0] = (uint8_t)host_len;
+    payload[1] = 0; payload[2] = 0; payload[3] = 0;
+    memcpy(&payload[4], host, host_len);
+
+    return send_netpipe_frame(NETPIPE_OP_DNS_RESOLVE, 0,
+                               payload, 4 + host_len);
+}
+
+esp_err_t ghost_netpipe_parse(const void *frame_payload, size_t frame_len,
+                               uint8_t *out_op, uint8_t *out_conn_id,
+                               const void **out_data, size_t *out_data_len)
+{
+    if (frame_len < sizeof(ghost_netpipe_header_t)) return ESP_ERR_INVALID_SIZE;
+
+    const ghost_netpipe_header_t *hdr = (const ghost_netpipe_header_t *)frame_payload;
+    if (out_op) *out_op = hdr->op;
+    if (out_conn_id) *out_conn_id = hdr->conn_id;
+    if (out_data) *out_data = (const uint8_t *)frame_payload + sizeof(ghost_netpipe_header_t);
+    if (out_data_len) *out_data_len = frame_len - sizeof(ghost_netpipe_header_t);
+    return ESP_OK;
+}

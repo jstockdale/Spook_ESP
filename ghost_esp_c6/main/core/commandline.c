@@ -9,6 +9,7 @@
 #include "managers/gps_manager.h"
 #include "managers/settings_manager.h"
 #include "managers/sd_card_manager.h"
+#include "managers/net_pipe.h"
 #include "vendor/pcap.h"
 #include "vendor/printer.h"
 #include "vendor/dial_client.h"
@@ -638,6 +639,40 @@ static void cmd_printer(int argc, char **argv) {
     printer_send_job(argv[1], argv[2], atoi(argv[3]), argv[4]);
 }
 
+/* ── Network Pipe ── */
+static void cmd_netpipe(int argc, char **argv) {
+    if (argc < 2) {
+        OUT("Usage: netpipe status|close <id>|closeall\n");
+        return;
+    }
+
+    if (strcmp(argv[1], "status") == 0) {
+        OUT("Network pipe: %s\n", net_pipe_is_available() ? "available" : "unavailable");
+        OUT("Active connections: %d/%d\n", net_pipe_active_connections(), NETPIPE_MAX_CONNECTIONS);
+        OUT("WiFi connected: %s\n", wifi_manager_is_connected() ? "yes" : "no");
+        if (!wifi_manager_is_connected()) {
+            OUT("Run 'connect <SSID> <pass>' first for internet access.\n");
+        }
+    } else if (strcmp(argv[1], "close") == 0 && argc >= 3) {
+        int id = atoi(argv[2]);
+        OUT("Closing connection %d...\n", id);
+        /* Send close via the same handler the P4 would use */
+        uint8_t close_frame[sizeof(netpipe_header_t)];
+        netpipe_header_t *hdr = (netpipe_header_t *)close_frame;
+        hdr->op = NETPIPE_OP_CLOSE;
+        hdr->conn_id = (uint8_t)id;
+        hdr->flags = 0;
+        net_pipe_handle_frame(close_frame, sizeof(close_frame));
+    } else if (strcmp(argv[1], "closeall") == 0) {
+        OUT("Closing all connections...\n");
+        net_pipe_deinit();
+        net_pipe_init();
+        OUT("All connections closed.\n");
+    } else {
+        OUT("Unknown: netpipe %s\n", argv[1]);
+    }
+}
+
 /* ── Wardriving ── */
 static void cmd_wardrive(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "-s") == 0) {
@@ -782,6 +817,9 @@ void command_register_all(void)
     command_register("tplink",     "TP-Link plug control (on/off/loop)", cmd_tplink);
     command_register("dialconnect","DIAL cast to smart TVs",             cmd_dialconnect);
     command_register("printer",    "Print to network printer",           cmd_printer);
+
+    /* Network pipe */
+    command_register("netpipe",    "Network pipe: status|close <id>|closeall", cmd_netpipe);
 
     /* Wardriving / GPS */
     command_register("wardrive",   "WiFi wardriving [-s to stop]",       cmd_wardrive);

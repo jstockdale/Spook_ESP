@@ -13,6 +13,7 @@ set(COMPONENT_SRCS
     "managers/gps_manager.c"
     "managers/settings_manager.c"
     "managers/sd_card_manager.c"
+    "managers/net_pipe.c"
     "vendor/pcap.c"
     "vendor/printer.c"
     "vendor/dial_client.c"
@@ -35,6 +36,7 @@ idf_component_register(
         esp_event
         esp_http_server
         esp_http_client
+        esp_tls
         driver
         esp_driver_sdio
         esp_driver_uart

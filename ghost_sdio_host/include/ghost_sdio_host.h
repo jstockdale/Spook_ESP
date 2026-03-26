@@ -180,6 +180,101 @@ esp_err_t          ghost_sdio_host_send_control(ghost_control_t ctrl);
 const char *ghost_status_to_str(ghost_status_t status);
 const char *ghost_radio_mode_to_str(ghost_radio_mode_t mode);
 
+/* ══════════════════════════════════════════════════════════════════════
+ *  Network Pipe — P4-side convenience API
+ *
+ *  The C6 acts as a TCP/UDP/TLS socket proxy. These functions build
+ *  and send NETPIPE frames so the P4 can make network requests
+ *  through the C6's WiFi connection.
+ *
+ *  Before using: send "connect <SSID> <pass>" to the C6 first.
+ *
+ *  Flow:
+ *    ghost_sdio_host_send_cmd("connect MyWiFi password");
+ *    // wait for GHOST_STATUS_CONNECTED
+ *    int id = ghost_netpipe_tcp_connect("api.example.com", 443, true);
+ *    ghost_netpipe_send(id, request, req_len);
+ *    // response arrives via frame_cb as GHOST_FRAME_NETPIPE
+ *    ghost_netpipe_close(id);
+ * ══════════════════════════════════════════════════════════════════════ */
+
+/* NETPIPE sub-protocol ops (must match C6 net_pipe.h) */
+#define NETPIPE_OP_TCP_CONNECT   0x01
+#define NETPIPE_OP_UDP_SEND      0x02
+#define NETPIPE_OP_DATA          0x03
+#define NETPIPE_OP_CLOSE         0x04
+#define NETPIPE_OP_DNS_RESOLVE   0x05
+#define NETPIPE_OP_CONNECT_OK    0x81
+#define NETPIPE_OP_CONNECT_FAIL  0x82
+#define NETPIPE_OP_DATA_RECV     0x83
+#define NETPIPE_OP_CLOSED        0x84
+#define NETPIPE_OP_DNS_RESULT    0x85
+#define NETPIPE_OP_UDP_RECV      0x86
+
+/* NETPIPE sub-header (4 bytes, must match C6) */
+typedef struct __attribute__((packed)) {
+    uint8_t  op;
+    uint8_t  conn_id;
+    uint16_t flags;
+} ghost_netpipe_header_t;
+
+/**
+ * Request a TCP connection through the C6.
+ * The C6 will respond with NETPIPE_OP_CONNECT_OK or CONNECT_FAIL
+ * delivered to your frame_cb as a GHOST_FRAME_NETPIPE.
+ *
+ * @param host    Hostname or IP
+ * @param port    Port number
+ * @param use_tls true for TLS (HTTPS), false for plain TCP
+ * @return ESP_OK if request was sent
+ */
+esp_err_t ghost_netpipe_tcp_connect(const char *host, uint16_t port, bool use_tls);
+
+/**
+ * Send data on an open connection.
+ * @param conn_id  Connection ID from CONNECT_OK response
+ * @param data     Data to send
+ * @param len      Data length
+ */
+esp_err_t ghost_netpipe_send(uint8_t conn_id, const void *data, size_t len);
+
+/**
+ * Close a connection.
+ */
+esp_err_t ghost_netpipe_close(uint8_t conn_id);
+
+/**
+ * Send a UDP datagram through the C6.
+ * @param host  Destination hostname or IP
+ * @param port  Destination port
+ * @param data  Datagram payload
+ * @param len   Payload length
+ */
+esp_err_t ghost_netpipe_udp_send(const char *host, uint16_t port,
+                                  const void *data, size_t len);
+
+/**
+ * Request DNS resolution through the C6.
+ * Result arrives via frame_cb as NETPIPE_OP_DNS_RESULT.
+ */
+esp_err_t ghost_netpipe_dns_resolve(const char *host);
+
+/**
+ * Parse a NETPIPE frame received in frame_cb.
+ * Extracts the op, conn_id, and payload pointer.
+ *
+ * @param frame_payload  Payload from GHOST_FRAME_NETPIPE
+ * @param frame_len      Payload length
+ * @param out_op         Output: operation code
+ * @param out_conn_id    Output: connection ID
+ * @param out_data       Output: pointer to op-specific data
+ * @param out_data_len   Output: length of op-specific data
+ * @return ESP_OK if parsed successfully
+ */
+esp_err_t ghost_netpipe_parse(const void *frame_payload, size_t frame_len,
+                               uint8_t *out_op, uint8_t *out_conn_id,
+                               const void **out_data, size_t *out_data_len);
+
 #ifdef __cplusplus
 }
 #endif

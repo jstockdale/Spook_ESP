@@ -3,6 +3,7 @@
 #include "core/system_manager.h"
 #include "managers/wifi_manager.h"
 #include "managers/gps_manager.h"
+#include "managers/net_pipe.h"
 #include "managers/settings_manager.h"
 #include "managers/ap_manager.h"
 #include "managers/sd_card_manager.h"
@@ -59,6 +60,10 @@ void app_main(void)
 
     /* Register SDIO frame handlers */
     sdio_transport_register_handler(GHOST_FRAME_GPS, gps_manager_update_from_sdio);
+
+    /* Network pipe — TCP/UDP proxy for P4 internet access */
+    net_pipe_init();
+    sdio_transport_register_handler(GHOST_FRAME_NETPIPE, net_pipe_handle_frame);
 #endif
 #if defined(CONFIG_GHOST_UART_FALLBACK)
     uart_transport_init();
